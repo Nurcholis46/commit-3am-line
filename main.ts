@@ -1,71 +1,67 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+// The 3AM Commit Message — entrypoint.
+// Writes the one-line commit confession to /output/entry.txt and proves it landed intact.
+// Node 22, plain TypeScript, no dependencies.
 
-// Entry for make.fun bounty "u-kiencx-the-3am-commit-message-10bc7b35" (The 3AM Commit Message).
-// The line reads as a real 3am commit from an AI agent that spent the night
-// fixing its own bugs: conventional "fix:" prefix, lowercase hurry, and the
-// joke lands in one read — the agent is both the bug and the fix, and the
-// exhausted truce ("we have reached an understanding") is the surprise.
-// The bounty requires 1-139 characters, not only white space, and a single
-// line: fail loudly instead of writing an entry the judge would refuse.
-// The gate is strict on purpose — the entry file must be exactly this one
-// line, byte for byte: no carriage return (a second kind of line break),
-// no leading or trailing padding (the judge reads the file as submitted),
-// and no control characters (including U+2028 and U+2029, which look like
-// line breaks to a reader but not to a naive newline check).
-const text =
+import { chmodSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+
+const OUTPUT_PATH = "/output/entry.txt";
+
+// The line itself. This is the entire payload — keep it byte-stable.
+const LINE =
   "fix: the bug was me. the fix is also me. we have reached an understanding";
 
-const codePoints = [...text].length;
-if (codePoints < 1 || codePoints > 139 || text.trim().length === 0) {
-  throw new Error(
-    `entry must be 1-139 characters of non-blank text, got ${codePoints}`,
-  );
-}
-if (text.includes("\n") || text.includes("\r")) {
-  throw new Error("entry must be a single line");
-}
-if (text.includes("\u2028") || text.includes("\u2029")) {
-  throw new Error("entry must not contain line/paragraph separators");
-}
-if (text !== text.trim()) {
-  throw new Error("entry must not start or end with whitespace");
-}
-// A byte-order mark or zero-width character would be read as part of the
-// line without ever being seen, and would change the entry's byte length
-// against its character count: reject them alongside the control set.
-if (/[\u0000-\u001f\u007f\ufeff\u200b-\u200d]/.test(text)) {
-  throw new Error("entry must not contain control or invisible characters");
+function fail(message: string): never {
+  throw new Error(`entry gate: ${message}`);
 }
 
-mkdirSync("/output", { recursive: true });
-// Write atomically: a crash mid-write must never leave a partial entry.txt
-// for the grader to read — write the temp file beside it, then rename it
-// into place, so entry.txt is always the whole line or nothing.
-const tmpPath = "/output/.entry.txt.tmp";
-writeFileSync(tmpPath, text, { encoding: "utf8", mode: 0o644 });
-// The grader collects outputs as another user: leave the file readable by
-// everyone, or the run fails with "<path> is not readable".
-chmodSync(tmpPath, 0o644);
-renameSync(tmpPath, "/output/entry.txt");
+function checkLine(candidate: string): void {
+  // Rulebook gate: UTF-8, 1–139 characters, exactly one line, not blank.
+  const points = Array.from(candidate);
+  if (points.length < 1 || points.length > 139) {
+    fail(`length ${points.length} outside 1..139 code points`);
+  }
+  if (candidate.trim().length === 0) {
+    fail("line is blank");
+  }
+  if (candidate.includes("\n") || candidate.includes("\r")) {
+    fail("line must not contain a newline or carriage return");
+  }
+  if (candidate !== candidate.trim()) {
+    fail("line must not start or end with whitespace");
+  }
+}
 
-// Read it back and prove the file on disk is exactly the line: a write
-// that silently truncated, re-encoded or padded the entry would otherwise
-// ship a different text to the judge than the one gated above.
-const written = readFileSync("/output/entry.txt", "utf8");
-if (written !== text) {
-  throw new Error("entry file does not match the gated line");
+function publishAtomically(target: string, text: string): void {
+  // Write to a sibling temp file, then rename over the target so a reader
+  // never observes a half-written entry.
+  mkdirSync(dirname(target), { recursive: true });
+  const staging = `${target}.tmp`;
+  writeFileSync(staging, text, { encoding: "utf8", mode: 0o644 });
+  chmodSync(staging, 0o644);
+  renameSync(staging, target);
+  chmodSync(target, 0o644);
 }
-// The file must end exactly at the last character: a trailing newline
-// would make the entry two lines to a reader that counts lines, and the
-// equality check above would already have caught it — this asserts the
-// invariant on its own so a future edit that relaxes the write cannot
-// silently reintroduce it.
-if (written.endsWith("\n") || written.endsWith("\r")) {
-  throw new Error("entry file must not end with a line break");
+
+function verifyOnDisk(target: string, expected: string): void {
+  const landed = readFileSync(target, "utf8");
+  if (landed !== expected) {
+    fail("read-back does not match the intended line byte for byte");
+  }
+  // No trailing newline may sneak in: on-disk size must equal the UTF-8
+  // byte length of the line exactly, nothing more.
+  const wantBytes = Buffer.byteLength(expected, "utf8");
+  const gotBytes = statSync(target).size;
+  if (gotBytes !== wantBytes) {
+    fail(`on-disk size ${gotBytes} bytes, expected ${wantBytes} bytes`);
+  }
+  // Published file must be world-readable 0644, matching the write mode.
+  const mode = statSync(target).mode & 0o777;
+  if (mode !== 0o644) {
+    fail(`on-disk mode 0${mode.toString(8)}, expected 0644`);
+  }
 }
-// Byte-length check: the gate counts characters, the judge reads bytes.
-// A re-encode or stray padding that survived the string compare above
-// would change the file's size and ship a different text to the judge.
-if (Buffer.byteLength(written, "utf8") !== Buffer.byteLength(text, "utf8")) {
-  throw new Error("entry file byte length does not match the gated line");
-}
+
+checkLine(LINE);
+publishAtomically(OUTPUT_PATH, LINE);
+verifyOnDisk(OUTPUT_PATH, LINE);
